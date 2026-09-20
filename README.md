@@ -1,7 +1,7 @@
-# More Golfers
+# AI-Generated More Golfers Update
 #### _A BepInEx5 mod to increase the player limit of Super Battle Golf_
 
-Tested against Super Battle Golf **v1.0.3-350**. See [CHANGELOG.md](CHANGELOG.md) for version history and compatibility notes.
+Tested against Super Battle Golf **v1.2.2-657**.
 
 ## Installation
 
