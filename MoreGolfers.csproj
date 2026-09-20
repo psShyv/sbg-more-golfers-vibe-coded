@@ -4,7 +4,7 @@
         <TargetFramework>netstandard2.1</TargetFramework>
         <AssemblyName>com.sulayre.moregolfers</AssemblyName>
         <Product>More Golfers</Product>
-        <Version>1.0.2</Version>
+        <Version>1.0.3</Version>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <LangVersion>latest</LangVersion>
         <RestoreAdditionalProjectSources>
@@ -32,6 +32,9 @@
     <ItemGroup>
         <Reference Include="GameAssembly" Publicize="true">
             <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\GameAssembly.dll</HintPath>
+        </Reference>
+        <Reference Include="Mirror">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Mirror.dll</HintPath>
         </Reference>
         <Reference Include="SharedAssembly" Publicize="true">
             <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\SharedAssembly.dll</HintPath>

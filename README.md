@@ -1,6 +1,8 @@
 # More Golfers
 #### _A BepInEx5 mod to increase the player limit of Super Battle Golf_
 
+Tested against Super Battle Golf **v1.0.3-350**. See [CHANGELOG.md](CHANGELOG.md) for version history and compatibility notes.
+
 ## Installation
 
 - [Install BepInEx 5](https://github.com/BepInEx/BepInEx/releases) 
