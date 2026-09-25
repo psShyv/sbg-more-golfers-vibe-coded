@@ -1,5 +1,5 @@
-# AI-Generated More Golfers Update
-#### _A BepInEx5 mod to increase the player limit of Super Battle Golf_
+# Vibe Coded More Golfers Update
+#### _An update to the BepInEx5 mod to increase the player limit of Super Battle Golf_
 
 Tested against Super Battle Golf **v1.2.2-657**.
 
