@@ -162,6 +162,83 @@ public class MoreGolfersPlugin : BaseUnityPlugin
         return MaxPlayersConfig.Value;
     }
 
+    // NameTagManager backs a single pool (NameTagManager.nameTagPool) shared by every caller of
+    // GetUnusedNameTag/ReturnNameTag. Only two of those callers scale with the player cap rather
+    // than being a fixed handful: PlayerId hands out one name tag per connected player, and
+    // GolfBall hands out one per ball that needs a name tag - so the worst realistic case is every
+    // player's own name tag and every player's ball name tag alive at the same time, i.e. 2x the
+    // player cap. LocalSpectatorCameraFollower also borrows one while spectating, which
+    // PoolSizeSlack (already used above for the same purpose) covers along with anything briefly
+    // in flight around a pool/return race.
+    //
+    // Unlike the progress-bar pool this one has no lifecycle bug - NameTagManager.ReturnNameTag
+    // destroys the actual GameObject, correctly, once the pool is full - so an undersized pool here
+    // isn't a crash risk, just destroy/reinstantiate churn on every hole transition once the lobby
+    // outgrows vanilla's 16-player assumption.
+    public static int GetRequiredNameTagPoolSize()
+    {
+        return MaxPlayersConfig.Value * 2 + PoolSizeSlack;
+    }
+
+    // WorldspaceIconManager backs a single pool (iconPool) shared by every icon type it serves:
+    // objective, ball dispenser, hole, red/blue team and homing-warning icons are a fixed handful
+    // tied to level geometry or in-flight projectiles, not the player cap, but two are not -
+    // PlayerInfo.cs hands every OTHER connected player a teammateWorldSpaceIcon (so up to
+    // MaxPlayers-1 concurrently on any one client), and GolfBall.cs hands one to every ball that
+    // needs a worldspace icon (up to MaxPlayers, same one-ball-per-player assumption as the name
+    // tag pool above). Sized the same way as the name tag pool for the same reason - worst case is
+    // every other player's teammate icon plus every player's ball icon at once - with PoolSizeSlack
+    // covering the fixed handful of level/projectile icons on top.
+    //
+    // Same as the name tag pool: no lifecycle bug, WorldspaceIconManager.ReturnIcon destroys the
+    // GameObject correctly once over capacity, so this is churn (extra Instantiate/Destroy traffic
+    // whenever visibility changes at higher player counts), not a crash risk.
+    public static int GetRequiredWorldspaceIconPoolSize()
+    {
+        return MaxPlayersConfig.Value * 2 + PoolSizeSlack;
+    }
+
+    // TextPopupManager backs the floating stroke/penalty text popup shown over a player's head
+    // (PlayerInfo.cs's only caller of GetUnusedPopup). Popups are transient like hit tees, but
+    // unlike hit tees they can burst in the exact way the hole-progress-bar bug already showed is
+    // dangerous: a hole ending is a moment where every player in the lobby can trigger a scoring
+    // popup within the same frame. Sized at 1x the player cap plus slack for the same reason as the
+    // hit-tee pool - the whole lobby popping a stroke result at once is the worst realistic case.
+    //
+    // No lifecycle bug here either - TextPopupManager.ReturnPopup destroys the GameObject correctly
+    // once over capacity - so, again, this removes churn rather than fixing a crash.
+    public static int GetRequiredTextPopupPoolSize()
+    {
+        return MaxPlayersConfig.Value + PoolSizeSlack;
+    }
+
+    // JumboBurgerGiantFormTimerManager backs the on-screen timer shown while a player is in giant
+    // form (PlayerInfo.cs's only caller of GetUnusedTimer). One per player who has the effect
+    // active - worst realistic case is every player in the lobby eating a jumbo burger around the
+    // same time - so sized like the text-popup pool: 1x the player cap plus slack. Same static-cache
+    // Awake pattern as the other pools above (staticallyCachedMaxPoolSize), same lack of a lifecycle
+    // bug (ReturnTimer destroys the GameObject correctly when over capacity) - churn only.
+    public static int GetRequiredJumboBurgerTimerPoolSize()
+    {
+        return MaxPlayersConfig.Value + PoolSizeSlack;
+    }
+
+    // LockOnTargetUiManager backs the local player's own homing-weapon lock-on reticle UI
+    // (PlayerGolfer.cs/PlayerInventory.cs call AddTarget/RemoveTarget for every opponent that
+    // becomes a valid lock-on target for whatever weapon is currently equipped). How many targets
+    // can be simultaneously valid scales with how many opponents are in range at once, which scales
+    // with the lobby size - so sized the same as the text-popup and jumbo-burger pools above: 1x the
+    // player cap plus slack, covering every other player being a live target at once.
+    //
+    // Unlike the four pools above, this one does NOT cache maxPoolSize into a static field in
+    // Awake() - ReturnTargetUi reads the instance field directly every time - so there's no
+    // Prefix-before-the-copy timing requirement; see PatchLockOnTargetUiManagerAwake for why that
+    // patch is a Postfix instead of a Prefix, unlike every other pool patch in this file.
+    public static int GetRequiredLockOnTargetPoolSize()
+    {
+        return MaxPlayersConfig.Value + PoolSizeSlack;
+    }
+
     // How much to slow down each golf cart's own Mirror SyncVar broadcast rate (see
     // NetworkTrafficPatches.cs) relative to whatever the designers already configured. 1x at
     // vanilla's own player count or below - this mod should change nothing about a vanilla-sized

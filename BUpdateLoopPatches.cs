@@ -37,7 +37,12 @@ namespace MoreGolfers;
 
 internal static class BUpdateLoopRunner
 {
-    internal static void Run<T>(FieldInfo listField, Action<T> invoke, string loopName) where T : class
+    // destroyedLogKey/throwLogKey are precomputed once per loop (see each PatchBUpdateOnXxxLoop
+    // class's LoopName/DestroyedLogKey/ThrowLogKey constants) rather than built here from loopName
+    // on every call. Concatenating "bupdate-destroyed-" + loopName fresh every frame would allocate
+    // a new string on every single callback check, forever, for exactly the same reason the
+    // messages below are now built lazily - see ThrottledLog.ShouldLog's comment.
+    internal static void Run<T>(FieldInfo listField, Action<T> invoke, string loopName, string destroyedLogKey, string throwLogKey) where T : class
     {
         List<T> callbacks = listField.GetValue(null) as List<T>;
         if (callbacks == null)
@@ -70,10 +75,17 @@ internal static class BUpdateLoopRunner
             //     Casting to Object is what gets the real "has this been destroyed" answer.
             if (callback is UnityEngine.Object unityObject && unityObject == null)
             {
-                ThrottledLog.Warn(
-                    "bupdate-destroyed-" + loopName,
-                    $"BUpdate.{loopName} is still holding a destroyed {callback.GetType().Name} that never " +
-                    "deregistered itself. Skipping it instead of letting it throw.");
+                // ShouldLog is checked before the message is built, not after, so a callback stuck
+                // in this state forever (the exact failure mode this file exists to survive) costs
+                // one dictionary lookup per frame instead of one string allocation per frame - the
+                // interpolated message is only actually constructed on the ~1-in-N frames that will
+                // really be logged.
+                if (ThrottledLog.ShouldLog(destroyedLogKey))
+                {
+                    MoreGolfersPlugin.Logger?.LogWarning(
+                        $"BUpdate.{loopName} is still holding a destroyed {callback.GetType().Name} that never " +
+                        "deregistered itself. Skipping it instead of letting it throw.");
+                }
                 continue;
             }
 
@@ -84,11 +96,13 @@ internal static class BUpdateLoopRunner
             }
             catch (Exception ex)
             {
-                ThrottledLog.Warn(
-                    "bupdate-throw-" + loopName,
-                    $"Caught {ex.GetType().Name} from {callback.GetType().Name} in BUpdate.{loopName}. " +
-                    "Vanilla would have aborted every remaining callback this frame and every frame after. " +
-                    $"Message: {ex.Message}");
+                if (ThrottledLog.ShouldLog(throwLogKey))
+                {
+                    MoreGolfersPlugin.Logger?.LogWarning(
+                        $"Caught {ex.GetType().Name} from {callback.GetType().Name} in BUpdate.{loopName}. " +
+                        "Vanilla would have aborted every remaining callback this frame and every frame after. " +
+                        $"Message: {ex.Message}");
+                }
             }
         }
     }
@@ -133,6 +147,14 @@ static class PatchBUpdateOnUpdateLoop
     // Cached so the delegate isn't reallocated every frame.
     private static readonly Action<IBUpdateCallback> Invoke = callback => callback.OnBUpdate();
 
+    // Compile-time constants: the compiler constant-folds these concatenations into single
+    // interned string literals, so passing them to BUpdateLoopRunner.Run costs nothing at runtime,
+    // unlike rebuilding "bupdate-destroyed-" + loopName from a parameter on every single call.
+    private const string LoopName = "OnUpdateLoop";
+    private const string DestroyedLogKey = "bupdate-destroyed-" + LoopName;
+    private const string ThrowLogKey = "bupdate-throw-" + LoopName;
+    private const string InvokeRepeatingThrowLogKey = "bupdate-throw-InvokeRepeating";
+
     // BUpdate.InvokeRepeatingInstance is `internal`, so it can't be named at compile time even
     // against a publicized reference. Resolving it from the list's generic argument and handling
     // elements as `object` sidesteps that without needing the type name.
@@ -157,7 +179,7 @@ static class PatchBUpdateOnUpdateLoop
 
     static bool Prefix()
     {
-        BUpdateLoopRunner.Run(CallbacksField, Invoke, "OnUpdateLoop");
+        BUpdateLoopRunner.Run(CallbacksField, Invoke, LoopName, DestroyedLogKey, ThrowLogKey);
         RunInvokeRepeating();
         return false; // original fully replaced above.
     }
@@ -173,9 +195,25 @@ static class PatchBUpdateOnUpdateLoop
         // Vanilla foreach-es this list, which throws InvalidOperationException if a callback calls
         // BUpdate.CancelInvoke (a RemoveAll) while it is being iterated - a perfectly natural thing
         // for a repeating callback to do, e.g. a timer that cancels itself on its final tick.
-        // Indexing with Count re-read each iteration removes that failure mode.
-        for (int i = 0; i < instances.Count; i++)
+        //
+        // This used to be indexed forward (0 to Count), which avoids that exception but trades it
+        // for a subtler bug: removing the element at the current index shifts the next element down
+        // into that same slot, and a forward loop's i++ then skips straight past it without ever
+        // processing it that frame. Iterating backward - the same bounds-recheck pattern already
+        // proven correct for the five callback loops in BUpdateLoopRunner.Run above - removes both
+        // failure modes at once: no exception from mutation during iteration, and no skipped
+        // element, regardless of how many entries a callback removes or which ones. The one
+        // observable difference from vanilla is that multiple InvokeRepeating callbacks due on the
+        // same frame now fire in reverse-registration order rather than registration order; nothing
+        // about BUpdate.InvokeRepeating's contract (independent, unordered periodic callbacks used
+        // throughout the game) suggests any caller depends on that order.
+        for (int i = instances.Count - 1; i >= 0; i--)
         {
+            if (i >= instances.Count)
+            {
+                continue;
+            }
+
             object instance = instances[i];
             if (instance == null)
             {
@@ -198,10 +236,12 @@ static class PatchBUpdateOnUpdateLoop
             }
             catch (Exception ex)
             {
-                ThrottledLog.Warn(
-                    "bupdate-throw-InvokeRepeating",
-                    $"Caught {ex.GetType().Name} from a BUpdate.InvokeRepeating callback that would otherwise " +
-                    $"have aborted the rest of this frame's update loop: {ex.Message}");
+                if (ThrottledLog.ShouldLog(InvokeRepeatingThrowLogKey))
+                {
+                    MoreGolfersPlugin.Logger?.LogWarning(
+                        $"Caught {ex.GetType().Name} from a BUpdate.InvokeRepeating callback that would otherwise " +
+                        $"have aborted the rest of this frame's update loop: {ex.Message}");
+                }
             }
 
             // Stamped even when the callback threw, so a consistently failing repeating callback
@@ -218,14 +258,18 @@ static class PatchBUpdateOnLateUpdateLoop
     private static readonly FieldInfo CallbacksField = AccessTools.Field(typeof(BUpdate), "lateUpdateCallbacks");
     private static readonly Action<ILateBUpdateCallback> Invoke = callback => callback.OnLateBUpdate();
 
+    private const string LoopName = "OnLateUpdateLoop";
+    private const string DestroyedLogKey = "bupdate-destroyed-" + LoopName;
+    private const string ThrowLogKey = "bupdate-throw-" + LoopName;
+
     static bool Prepare()
     {
-        return BUpdateLoopPrerequisites.Check("OnLateUpdateLoop", CallbacksField);
+        return BUpdateLoopPrerequisites.Check(LoopName, CallbacksField);
     }
 
     static bool Prefix()
     {
-        BUpdateLoopRunner.Run(CallbacksField, Invoke, "OnLateUpdateLoop");
+        BUpdateLoopRunner.Run(CallbacksField, Invoke, LoopName, DestroyedLogKey, ThrowLogKey);
         return false;
     }
 }
@@ -236,14 +280,18 @@ static class PatchBUpdateOnPreLateUpdateLoop
     private static readonly FieldInfo CallbacksField = AccessTools.Field(typeof(BUpdate), "preLateUpdateCallbacks");
     private static readonly Action<IPreLateBUpdateCallback> Invoke = callback => callback.OnPreLateBUpdate();
 
+    private const string LoopName = "OnPreLateUpdateLoop";
+    private const string DestroyedLogKey = "bupdate-destroyed-" + LoopName;
+    private const string ThrowLogKey = "bupdate-throw-" + LoopName;
+
     static bool Prepare()
     {
-        return BUpdateLoopPrerequisites.Check("OnPreLateUpdateLoop", CallbacksField);
+        return BUpdateLoopPrerequisites.Check(LoopName, CallbacksField);
     }
 
     static bool Prefix()
     {
-        BUpdateLoopRunner.Run(CallbacksField, Invoke, "OnPreLateUpdateLoop");
+        BUpdateLoopRunner.Run(CallbacksField, Invoke, LoopName, DestroyedLogKey, ThrowLogKey);
         return false;
     }
 }
@@ -254,14 +302,18 @@ static class PatchBUpdateOnFixedUpdateLoop
     private static readonly FieldInfo CallbacksField = AccessTools.Field(typeof(BUpdate), "fixedUpdateCallbacks");
     private static readonly Action<IFixedBUpdateCallback> Invoke = callback => callback.OnFixedBUpdate();
 
+    private const string LoopName = "OnFixedUpdateLoop";
+    private const string DestroyedLogKey = "bupdate-destroyed-" + LoopName;
+    private const string ThrowLogKey = "bupdate-throw-" + LoopName;
+
     static bool Prepare()
     {
-        return BUpdateLoopPrerequisites.Check("OnFixedUpdateLoop", CallbacksField);
+        return BUpdateLoopPrerequisites.Check(LoopName, CallbacksField);
     }
 
     static bool Prefix()
     {
-        BUpdateLoopRunner.Run(CallbacksField, Invoke, "OnFixedUpdateLoop");
+        BUpdateLoopRunner.Run(CallbacksField, Invoke, LoopName, DestroyedLogKey, ThrowLogKey);
         return false;
     }
 }
@@ -272,14 +324,18 @@ static class PatchBUpdateOnPostFixedUpdateLoop
     private static readonly FieldInfo CallbacksField = AccessTools.Field(typeof(BUpdate), "postFixedUpdateCallbacks");
     private static readonly Action<IPostFixedBUpdateCallback> Invoke = callback => callback.OnPostFixedBUpdate();
 
+    private const string LoopName = "OnPostFixedUpdateLoop";
+    private const string DestroyedLogKey = "bupdate-destroyed-" + LoopName;
+    private const string ThrowLogKey = "bupdate-throw-" + LoopName;
+
     static bool Prepare()
     {
-        return BUpdateLoopPrerequisites.Check("OnPostFixedUpdateLoop", CallbacksField);
+        return BUpdateLoopPrerequisites.Check(LoopName, CallbacksField);
     }
 
     static bool Prefix()
     {
-        BUpdateLoopRunner.Run(CallbacksField, Invoke, "OnPostFixedUpdateLoop");
+        BUpdateLoopRunner.Run(CallbacksField, Invoke, LoopName, DestroyedLogKey, ThrowLogKey);
         return false;
     }
 }

@@ -17,16 +17,32 @@ internal static class ThrottledLog
     private const float ThrottleSeconds = 5f;
     private static readonly Dictionary<string, float> LastLoggedAt = new Dictionary<string, float>();
 
-    public static void Warn(string key, string message)
+    // Split out of Warn so a caller whose message is expensive to build (string interpolation,
+    // concatenation of non-constant values) can check this FIRST and only build the message inside
+    // the resulting `if` - rather than paying that cost on every call and discarding the result on
+    // the ones the throttle window would have skipped anyway. A caller passing a message that's
+    // already a compile-time-constant string literal (no interpolation, no non-constant
+    // concatenation - the compiler constant-folds it to one literal with zero runtime cost) has no
+    // reason to bother with this and can keep calling Warn directly, exactly as before.
+    public static bool ShouldLog(string key)
     {
         float now = Time.unscaledTime;
         float last;
         if (LastLoggedAt.TryGetValue(key, out last) && now - last < ThrottleSeconds)
         {
-            return;
+            return false;
         }
 
         LastLoggedAt[key] = now;
+        return true;
+    }
+
+    public static void Warn(string key, string message)
+    {
+        if (!ShouldLog(key))
+        {
+            return;
+        }
 
         // Null-conditional: a patch can in principle fire before the plugin's Awake has run.
         MoreGolfersPlugin.Logger?.LogWarning(message);

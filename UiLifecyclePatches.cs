@@ -228,3 +228,119 @@ static class PatchGolfTeeManagerAwake
         ___maxHitTeePoolSize = required;
     }
 }
+
+// Third pool sized against vanilla's 16-player cap: NameTagManager.Awake copies its serialized
+// maxPoolSize into a static cache (staticallyCachedMaxPoolSize) the same way GolfTeeManager does
+// for staticallyCachedMaxHitTeePoolSize above, and NameTagManager.ReturnNameTag destroys anything
+// that arrives once nameTagPool.Count reaches that cached size instead of pooling it. PlayerId and
+// GolfBall are the two callers that scale with player count (see
+// MoreGolfersPlugin.GetRequiredNameTagPoolSize for why 2x), so at 32-64 players a pool sized for 16
+// would otherwise turn every hole transition into a burst of name-tag destroy/reinstantiate churn,
+// on top of the progress-bar and hit-tee churn the other two patches already remove.
+//
+// No lifecycle bug here unlike PatchHoleProgressBarUiAwake above - ReturnNameTag destroys the
+// GameObject itself, correctly, in the pool-full branch - so this is purely about removing the
+// churn, not about correctness.
+//
+// This MUST be a Prefix, for the same reason as PatchGolfTeeManagerAwake: Awake's own body is what
+// reads maxPoolSize into the static cache that GetUnusedNameTag/ReturnNameTag actually consult, so
+// a Postfix would set the field after the value that matters had already been captured.
+[HarmonyPatch(typeof(NameTagManager), "Awake")]
+static class PatchNameTagManagerAwake
+{
+    static void Prefix(ref int ___maxPoolSize)
+    {
+        int required = MoreGolfersPlugin.GetRequiredNameTagPoolSize();
+        if (___maxPoolSize >= required)
+        {
+            return;
+        }
+
+        ___maxPoolSize = required;
+    }
+}
+
+// Fourth pool of this same shape: WorldspaceIconManager.Awake copies its serialized maxPoolSize
+// into a static cache exactly like NameTagManager does, and WorldspaceIconManager.ReturnIcon
+// destroys anything over that cached size instead of pooling it. See
+// MoreGolfersPlugin.GetRequiredWorldspaceIconPoolSize for which callers scale with player count
+// (teammate icons and ball icons) and why 2x. Must be a Prefix for the same reason as the other
+// three Awake patches in this file: the static cache is populated from Awake's own body, so a
+// Postfix would run too late to change what gets cached.
+[HarmonyPatch(typeof(WorldspaceIconManager), "Awake")]
+static class PatchWorldspaceIconManagerAwake
+{
+    static void Prefix(ref int ___maxPoolSize)
+    {
+        int required = MoreGolfersPlugin.GetRequiredWorldspaceIconPoolSize();
+        if (___maxPoolSize >= required)
+        {
+            return;
+        }
+
+        ___maxPoolSize = required;
+    }
+}
+
+// Fifth pool of this same shape: TextPopupManager.Awake copies its serialized maxPoolSize into a
+// static cache exactly like the four patches above, and TextPopupManager.ReturnPopup destroys
+// anything over that cached size instead of pooling it. See
+// MoreGolfersPlugin.GetRequiredTextPopupPoolSize for why this is sized like the hit-tee pool
+// rather than the 2x pools above. Must be a Prefix for the same reason as the others: Awake's own
+// body populates the static cache this patch needs to change before it's read.
+[HarmonyPatch(typeof(TextPopupManager), "Awake")]
+static class PatchTextPopupManagerAwake
+{
+    static void Prefix(ref int ___maxPoolSize)
+    {
+        int required = MoreGolfersPlugin.GetRequiredTextPopupPoolSize();
+        if (___maxPoolSize >= required)
+        {
+            return;
+        }
+
+        ___maxPoolSize = required;
+    }
+}
+
+// Sixth pool of this same shape: JumboBurgerGiantFormTimerManager.Awake copies its serialized
+// maxPoolSize into a static cache exactly like the pools above, and ReturnTimer destroys anything
+// over that cached size instead of pooling it. See
+// MoreGolfersPlugin.GetRequiredJumboBurgerTimerPoolSize. Prefix for the same reason as the other
+// static-cache patches: Awake's own body populates the cache this patch needs to change first.
+[HarmonyPatch(typeof(JumboBurgerGiantFormTimerManager), "Awake")]
+static class PatchJumboBurgerGiantFormTimerManagerAwake
+{
+    static void Prefix(ref int ___maxPoolSize)
+    {
+        int required = MoreGolfersPlugin.GetRequiredJumboBurgerTimerPoolSize();
+        if (___maxPoolSize >= required)
+        {
+            return;
+        }
+
+        ___maxPoolSize = required;
+    }
+}
+
+// Seventh pool, same churn problem, different shape: LockOnTargetUiManager does NOT cache
+// maxPoolSize into a static field the way the six pools above do - ReturnTargetUi
+// (LockOnTargetUiManager.cs) reads the serialized instance field directly on every call. That
+// means there's no "must run before Awake's body copies the value" constraint, so unlike every
+// other patch in this file this one is a Postfix: it only needs to have changed the field by the
+// time anything else can possibly call ReturnTargetUi, and nothing can do that before Awake
+// returns. See MoreGolfersPlugin.GetRequiredLockOnTargetPoolSize for sizing.
+[HarmonyPatch(typeof(LockOnTargetUiManager), "Awake")]
+static class PatchLockOnTargetUiManagerAwake
+{
+    static void Postfix(ref int ___maxPoolSize)
+    {
+        int required = MoreGolfersPlugin.GetRequiredLockOnTargetPoolSize();
+        if (___maxPoolSize >= required)
+        {
+            return;
+        }
+
+        ___maxPoolSize = required;
+    }
+}
