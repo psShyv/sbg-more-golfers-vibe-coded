@@ -24,20 +24,29 @@ namespace MoreGolfers;
 //    reservation and team on Info), synced through Mirror's ordinary ("reliable") SyncVar
 //    mechanism and gated by their own inherited syncInterval.
 //
-// 2. Entity.NetworkRigidbody (type NetworkRigidbodyUnreliable, confirmed a NetworkBehaviour via
-//    its use of isServer/isClient/isOwned/syncDirection in Entity.HasRigidbodyAuthority) - whose
-//    very name and the Baseline/Delta message pattern above both point at it as the source of the
-//    UNRELIABLE variant specifically. This is inferred rather than read directly (its own source
-//    still hasn't been supplied), but the inference no longer requires guessing at anything
-//    private: Entity.Awake() is fully verified, sets NetworkRigidbody directly in its own body,
-//    and (via its last line, a call to a compiler-generated local function) sets PredictedGolfCart
-//    by the time Awake returns - so a Postfix on Entity.Awake can gate on the public IsGolfCart
-//    property and only touch NetworkRigidbody's syncInterval for entities that are actually golf
-//    carts, using the same inherited Mirror field as the other two patches, on a class this file
-//    already has full source for.
+// 2. Entity.PredictedGolfCart (type Mirror.PredictedGolfCart) - NOT Entity.NetworkRigidbody as
+//    previously assumed. With full source now available, GolfCartInfo.cs settles this directly:
+//    GolfCartInfo.SetMovementSyncDirectionInternal, called every time the driver seat changes,
+//    sets syncDirection on AsEntity.PredictedGolfCart and Movement together and nothing else -
+//    there is no reference to Entity.NetworkRigidbody anywhere in GolfCartInfo or
+//    GolfCartMovement. Entity.IsSimulatingRigidbody() confirms the two are mutually exclusive by
+//    design: it checks PredictedGolfCart first and returns before ever consulting
+//    NetworkRigidbody. The NetworkRigidbodyUnreliable type Entity fetches generically is, per
+//    PlayerInfo.cs, actually the *player's* rigidbody sync component, not the cart's - so the
+//    previous version of this patch (gated on Entity.NetworkRigidbody) was very likely a no-op
+//    for every golf cart, since GetComponent<NetworkRigidbodyUnreliable>() on a cart has nothing
+//    to find.
 //
-// Entity.PredictedGolfCart and PhysicsManager remain untouched, same as before - genuinely unseen
-// source, no safe lever available.
+//    PredictedGolfCart is also the actual worst offender of the two, not a marginal add-on: its
+//    OnValidate() hard-codes `syncInterval = 0f`, and OnSerialize writes position, rotation,
+//    linear velocity, angular velocity, and all four wheel speeds - every server tick, uncapped,
+//    per cart. That baked-in 0 means it can't be scaled the same way as Movement/Info
+//    (0 * scale is still 0); Apply() below special-cases a zero baseline by seeding it from
+//    NetworkServer.sendInterval (1 / NetworkServer.tickRate) - the actual cadence "uncapped"
+//    already resolves to - rather than inventing a constant, so the "change nothing at vanilla
+//    player count" guarantee still holds.
+//
+// PhysicsManager remains untouched - genuinely unseen source, no safe lever available.
 // ---------------------------------------------------------------------------------------------
 
 internal static class NetworkSyncIntervalScaling
@@ -50,16 +59,17 @@ internal static class NetworkSyncIntervalScaling
     private static readonly FieldInfo SyncIntervalField =
         AccessTools.Field(typeof(NetworkBehaviour), "syncInterval");
 
-    // Entity.NetworkRigidbody is declared as NetworkRigidbodyUnreliable, which turns out to live
-    // in a separate assembly (Mirror.Components) that this project doesn't reference - confirmed
-    // by a real build failure (CS0012) the first time this was written as a direct typed access.
-    // Fetched by reflection instead: PropertyInfo.GetValue returns plain object, so the compiler
-    // never needs to resolve NetworkRigidbodyUnreliable at all, only NetworkBehaviour (Mirror.dll,
-    // already referenced throughout this project) once the result is cast below. This is a
-    // strictly better fix than adding a <Reference> for a specific DLL path that may not match
-    // every install - it removes the hard dependency rather than relocating it.
-    private static readonly PropertyInfo EntityNetworkRigidbodyProperty =
-        AccessTools.Property(typeof(Entity), "NetworkRigidbody");
+    // Entity.PredictedGolfCart is declared as Mirror.PredictedGolfCart, which lives in a separate
+    // assembly (Mirror.Components) that this project doesn't reference - confirmed by a real
+    // build failure (CS0012) the first time an equivalent access (then targeting
+    // NetworkRigidbodyUnreliable) was written as a direct typed reference. Fetched by reflection
+    // instead: PropertyInfo.GetValue returns plain object, so the compiler never needs to resolve
+    // PredictedGolfCart at all, only NetworkBehaviour (Mirror.dll, already referenced throughout
+    // this project) once the result is cast below. This is a strictly better fix than adding a
+    // <Reference> for a specific DLL path that may not match every install - it removes the hard
+    // dependency rather than relocating it.
+    private static readonly PropertyInfo EntityPredictedGolfCartProperty =
+        AccessTools.Property(typeof(Entity), "PredictedGolfCart");
 
     private static bool _hasLoggedUnavailable;
 
@@ -67,7 +77,7 @@ internal static class NetworkSyncIntervalScaling
     {
         get
         {
-            if (SyncIntervalField != null && EntityNetworkRigidbodyProperty != null)
+            if (SyncIntervalField != null && EntityPredictedGolfCartProperty != null)
             {
                 return true;
             }
@@ -79,7 +89,7 @@ internal static class NetworkSyncIntervalScaling
                 _hasLoggedUnavailable = true;
                 string missing = SyncIntervalField == null
                     ? "NetworkBehaviour.syncInterval"
-                    : "Entity.NetworkRigidbody";
+                    : "Entity.PredictedGolfCart";
                 MoreGolfersPlugin.Logger?.LogWarning(
                     $"Skipping golf cart sync-interval scaling: {missing} could not be resolved. " +
                     "Golf carts will sync at their unmodified rate.");
@@ -99,19 +109,32 @@ internal static class NetworkSyncIntervalScaling
         }
 
         // Scaled up from whatever the designers already set, rather than assumed outright -
-        // multiplying preserves their original tuning intent (Movement and Info are free to have
-        // been given different baseline intervals) instead of overwriting it with one guessed
-        // number.
+        // multiplying preserves their original tuning intent (Movement, Info, and PredictedGolfCart
+        // are free to have been given different baseline intervals) instead of overwriting it with
+        // one guessed number.
+        //
+        // PredictedGolfCart specifically ships with syncInterval hard-coded to 0f (see
+        // PredictedGolfCart.OnValidate in the decompiled source) - "send every tick, uncapped" -
+        // so 0f * scale would still be 0f and silently skip the one component that needs this
+        // most. Seed the baseline from NetworkServer.sendInterval (1 / tickRate) in that case:
+        // that's the real cadence 0f already resolves to, so scaling from it is consistent with
+        // "change nothing at vanilla player count" rather than inventing a number.
         float currentInterval = (float)SyncIntervalField.GetValue(behaviour);
+        if (currentInterval <= 0f)
+        {
+            currentInterval = NetworkServer.sendInterval;
+        }
+
         SyncIntervalField.SetValue(behaviour, currentInterval * scale);
     }
 
-    // Returns null if entity has no rigidbody sync component, exactly like the property itself
-    // would - callers already null-check the typed property elsewhere in this file, so this
-    // preserves that contract rather than silently changing behaviour at the reflection boundary.
-    internal static NetworkBehaviour GetEntityNetworkRigidbody(Entity entity)
+    // Returns null if entity has no predicted-cart sync component, exactly like the property
+    // itself would - callers already null-check the typed property elsewhere in this file, so
+    // this preserves that contract rather than silently changing behaviour at the reflection
+    // boundary.
+    internal static NetworkBehaviour GetEntityPredictedGolfCart(Entity entity)
     {
-        return EntityNetworkRigidbodyProperty.GetValue(entity) as NetworkBehaviour;
+        return EntityPredictedGolfCartProperty.GetValue(entity) as NetworkBehaviour;
     }
 }
 
@@ -147,16 +170,18 @@ static class PatchEntityAwake
             return;
         }
 
-        // Fetched by reflection rather than __instance.NetworkRigidbody directly - see the comment
-        // on EntityNetworkRigidbodyProperty above for why. Can legitimately be null even for a golf
-        // cart - Entity.IsSimulatingRigidbody has its own `NetworkRigidbody == null` branch - so
-        // this guards rather than assumes.
-        NetworkBehaviour networkRigidbody = NetworkSyncIntervalScaling.GetEntityNetworkRigidbody(__instance);
-        if (networkRigidbody == null)
+        // Fetched by reflection rather than __instance.PredictedGolfCart directly - see the
+        // comment on EntityPredictedGolfCartProperty above for why. Guarded rather than assumed
+        // non-null, consistent with every other lookup in this file, though in practice every
+        // golf cart is expected to have one (GolfCartInfo.SetMovementSyncDirectionInternal
+        // dereferences AsEntity.PredictedGolfCart unconditionally whenever the driver seat
+        // changes, with no null check of its own).
+        NetworkBehaviour predictedGolfCart = NetworkSyncIntervalScaling.GetEntityPredictedGolfCart(__instance);
+        if (predictedGolfCart == null)
         {
             return;
         }
 
-        NetworkSyncIntervalScaling.Apply(networkRigidbody);
+        NetworkSyncIntervalScaling.Apply(predictedGolfCart);
     }
 }
